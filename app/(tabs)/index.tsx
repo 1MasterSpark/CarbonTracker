@@ -1,3 +1,4 @@
+import { init } from "@instantdb/react";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -24,11 +25,20 @@ if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+const db = init({
+  appId: "8db0c932-a742-4c09-902e-893b67455139",
+});
+
+const queryOnce = (q) => new Promise((resolve, reject) => {
+  const unsub = db.subscribeQuery(q, ({data, error}) => {
+    unsub();
+    if (error) reject(error);
+    else resolve(data);
+  });
+});
+
 const VIN_MAX_LEN = 17;
-const USERS_KEY = '@users';
 const CURRENT_USER_KEY = '@currentUser';
-const USERDATA_KEY = (email: string) => `@userData:${email}`;
-const TRIPS_KEY = (email: string) => `@trips:${email}`;
 
 /* ---------- Types ---------- */
 type VehicleInfo = {
@@ -48,8 +58,6 @@ type VehicleInfo = {
   engineKW?: string;
   engineConfiguration?: string;
 };
-
-type User = { email: string; password: string };
 
 type StoredVehicle = {
   id: string;
@@ -118,7 +126,7 @@ const normalizeTrips = (arr: any[]): Trip[] =>
   })).filter(t => t.date);
 
 /* ---------- Main Screen ---------- */
-export default function IndexScreen(): JSX.Element {
+export default function HomeScreen(): JSX.Element {
   const [screen, setScreen] = useState<'landing' | 'decode' | 'login' | 'register' | 'account' | 'vehicles' | 'start' | 'trip'>('landing');
 
   // Landing “how to” was removed per request; only login visible.
@@ -140,7 +148,7 @@ export default function IndexScreen(): JSX.Element {
   const [registerSuccess, setRegisterSuccess] = useState<boolean>(false);
 
   // Session & user data
-  const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<string | null>(null); // now the user id, not email
   const [userData, setUserData] = useState<UserData | null>(null);
 
   // Trips (persisted per user)
@@ -167,8 +175,8 @@ export default function IndexScreen(): JSX.Element {
   const fadeAnim = useState(new Animated.Value(0))[0];
 
   // Refs + anchors for anchored modals
-  const avatarRef = useRef<View>(null);
-  const vehicleBtnRef = useRef<View>(null);
+  const avatarRef = useRef<View | null>(null);
+  const vehicleBtnRef = useRef<View | null>(null);
 
   const [avatarAnchor, setAvatarAnchor] = useState<Rect>({ x: 0, y: 0, w: 0, h: 0 });
   const [vehicleAnchor, setVehicleAnchor] = useState<Rect>({ x: 0, y: 0, w: 0, h: 0 });
@@ -182,7 +190,6 @@ export default function IndexScreen(): JSX.Element {
     x: 16, y: 140, w: screenWidth - 32, h: 48,
   };
 
-  // ---- FIXED TYPE: accept View | null in the ref ----
   const measureInWindowAsync = (ref: React.RefObject<View | null>, fallback: Rect): Promise<Rect> => {
     if (Platform.OS === 'web') return Promise.resolve(fallback);
     return new Promise<Rect>((resolve) => {
@@ -200,11 +207,11 @@ export default function IndexScreen(): JSX.Element {
   useEffect(() => {
     (async () => {
       try {
-        const savedEmail = await AsyncStorage.getItem(CURRENT_USER_KEY);
-        if (savedEmail) {
-          setCurrentUser(savedEmail);
-          await loadUserData(savedEmail);
-          await loadTrips(savedEmail);
+        const savedId = await AsyncStorage.getItem(CURRENT_USER_KEY);
+        if (savedId) {
+          setCurrentUser(savedId);
+          await loadUserData(savedId);
+          await loadTrips(savedId);
           setScreen('account'); // show home after autologin
         }
       } catch (e) {
@@ -213,46 +220,59 @@ export default function IndexScreen(): JSX.Element {
     })();
   }, []);
 
-  const currentInitial = (userData?.username || currentUser || "?").trim().charAt(0).toUpperCase();
+  const currentInitial = (userData?.username || email || "?").trim().charAt(0).toUpperCase();
 
   /* ---------- Storage helpers ---------- */
-  const loadUserData = async (emailAddr: string) => {
+  const loadUserData = async (userId: string) => {
     try {
-      const raw = await AsyncStorage.getItem(USERDATA_KEY(emailAddr));
-      if (raw) {
-        const parsed: UserData = JSON.parse(raw);
-        setUserData(parsed);
-      } else {
+      const { users } = await queryOnce({ users: { $: { where: { id: userId } } } });
+      const u = users[0];
+      if (!u) {
+        console.error("No user found");
+        return;
+      }
+      let parsed: UserData = {
+        username: u.username,
+        vehicles: u.vehicles || [],
+        selectedVehicleId: u.selectedVehicleId,
+      };
+      if (parsed.vehicles.length === 0) {
         // Seed with descriptors for display
-        const seed: UserData = {
-          username: emailAddr.split("@")[0],
-          vehicles: [
-            { id: 'v1', name: 'Corolla 1.8L', vin: 'JTNBU40E79SEED001', body: 'Sedan', fuel: 'Petrol', vehicleType: 'Passenger Car', year: '2018', avgEmissions: { day: 95, week: 110, month: 125 }, trend: [120, 118, 115, 112, 110, 108] },
-            { id: 'v2', name: 'CR-V 2.4L', vin: '2HKRM4H51EHSEED02', body: 'SUV', fuel: 'Petrol', vehicleType: 'Multipurpose', year: '2016', avgEmissions: { day: 140, week: 165, month: 180 }, trend: [190, 185, 182, 178, 175, 170] },
-            { id: 'v3', name: 'Model 3', vin: '5YJ3E1EAXKSSEED03', body: 'Sedan', fuel: 'Electric', vehicleType: 'Passenger Car', year: '2021', avgEmissions: { day: 0, week: 0, month: 0 }, trend: [10, 9, 8, 7, 6, 5] },
-          ],
+        const seedVehicles: StoredVehicle[] = [
+          { id: 'v1', name: 'Corolla 1.8L', vin: 'JTNBU40E79SEED001', body: 'Sedan', fuel: 'Petrol', vehicleType: 'Passenger Car', year: '2018', avgEmissions: { day: 95, week: 110, month: 125 }, trend: [120, 118, 115, 112, 110, 108] },
+          { id: 'v2', name: 'CR-V 2.4L', vin: '2HKRM4H51EHSEED02', body: 'SUV', fuel: 'Petrol', vehicleType: 'Multipurpose', year: '2016', avgEmissions: { day: 140, week: 165, month: 180 }, trend: [190, 185, 182, 178, 175, 170] },
+          { id: 'v3', name: 'Model 3', vin: '5YJ3E1EAXKSSEED03', body: 'Sedan', fuel: 'Electric', vehicleType: 'Passenger Car', year: '2021', avgEmissions: { day: 0, week: 0, month: 0 }, trend: [10, 9, 8, 7, 6, 5] },
+        ];
+        parsed = {
+          ...parsed,
+          vehicles: seedVehicles,
           selectedVehicleId: 'v1',
         };
-        await AsyncStorage.setItem(USERDATA_KEY(emailAddr), JSON.stringify(seed));
-        setUserData(seed);
+        await db.transact(db.tx.users[userId].update({ vehicles: seedVehicles, selectedVehicleId: 'v1' }));
       }
+      setUserData(parsed);
     } catch (e) { console.error("loadUserData error:", e); }
   };
 
-  const saveUserData = async (emailAddr: string, data: UserData) => {
+  const saveUserData = async (userId: string, data: UserData) => {
     try {
-      await AsyncStorage.setItem(USERDATA_KEY(emailAddr), JSON.stringify(data));
+      await db.transact(db.tx.users[userId].update(data));
       setUserData(data);
-    } catch (e) { console.error("saveUserData error:", e); }
+      return true;
+    } catch (e) { 
+      console.error("saveUserData error:", e);
+      Alert.alert("Error", "Failed to save user data: " + (e as Error).message);
+      return false;
+    }
   };
 
-  const loadTrips = async (emailAddr: string) => {
+  const loadTrips = async (userId: string) => {
     try {
-      const raw = await AsyncStorage.getItem(TRIPS_KEY(emailAddr));
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setTrips(normalizeTrips(parsed));
-      } else {
+      const { users } = await queryOnce({ users: { $: { where: { id: userId } } } });
+      const u = users[0];
+      if (!u) return;
+      let parsed = normalizeTrips(u.trips || []);
+      if (parsed.length === 0) {
         // Seed some demo trips for the user
         const seedTrips: Trip[] = normalizeTrips([
           { id: "t1", date: "2025-09-18", start: "Melbourne CBD", end: "Geelong", duration: 5400, distance: 75, emissions: 9500 },
@@ -260,17 +280,23 @@ export default function IndexScreen(): JSX.Element {
           { id: "t3", date: "2025-09-15", start: "La Trobe Uni", end: "Airport", duration: 3600, distance: 30, emissions: 4000 },
           { id: "t4", date: "2025-09-15", start: "Airport", end: "Docklands", duration: 2100, distance: 18, emissions: 2100 },
         ]);
-        await AsyncStorage.setItem(TRIPS_KEY(emailAddr), JSON.stringify(seedTrips));
-        setTrips(seedTrips);
+        await db.transact(db.tx.users[userId].update({ trips: seedTrips }));
+        parsed = seedTrips;
       }
+      setTrips(parsed);
     } catch (e) { console.error("loadTrips error:", e); }
   };
 
-  const saveTrips = async (emailAddr: string, data: Trip[]) => {
+  const saveTrips = async (userId: string, data: Trip[]) => {
     try {
-      await AsyncStorage.setItem(TRIPS_KEY(emailAddr), JSON.stringify(normalizeTrips(data)));
+      await db.transact(db.tx.users[userId].update({ trips: data }));
       setTrips(normalizeTrips(data));
-    } catch (e) { console.error("saveTrips error:", e); }
+      return true;
+    } catch (e) { 
+      console.error("saveTrips error:", e);
+      Alert.alert("Error", "Failed to save trips: " + (e as Error).message);
+      return false;
+    }
   };
 
   /* ---------- VIN decode (used in Vehicles modal) ---------- */
@@ -342,16 +368,17 @@ export default function IndexScreen(): JSX.Element {
       fuel: fuel || undefined,
       vehicleType: vehicle.vehicleType || undefined,
       year: vehicle.year || undefined,
-      // starter values; you can compute real ones later
       avgEmissions: { day: 120, week: 140, month: 160 },
       trend: [170, 168, 165, 162, 160, 158],
     };
 
     const updated: UserData = { ...userData, vehicles: [...userData.vehicles, newVehicle], selectedVehicleId: newVehicle.id };
-    await saveUserData(currentUser, updated);
+    const saved = await saveUserData(currentUser, updated);
 
-    setSuccess(true);
-    Alert.alert("Registration", "Vehicle added!");
+    if (saved) {
+      setSuccess(true);
+      Alert.alert("Registration", "Vehicle added!");
+    }
     // Reset modal fields & close
     setVin("");
     setVehicle(null);
@@ -364,14 +391,13 @@ export default function IndexScreen(): JSX.Element {
     setLoginError("");
     if (!email || !password) { setLoginError("Please fill in all fields."); return; }
     try {
-      const usersData = await AsyncStorage.getItem(USERS_KEY);
-      const users: User[] = usersData ? JSON.parse(usersData) : [];
-      const user = users.find((u) => u.email === email && u.password === password);
-      if (user) {
-        await AsyncStorage.setItem(CURRENT_USER_KEY, user.email);
-        setCurrentUser(user.email);
-        await loadUserData(user.email);
-        await loadTrips(user.email);
+      const { users } = await queryOnce({ users: { $: { where: { email: email } } } });
+      const user = users[0];
+      if (user && user.password === password) {
+        await AsyncStorage.setItem(CURRENT_USER_KEY, user.id);
+        setCurrentUser(user.id);
+        await loadUserData(user.id);
+        await loadTrips(user.id);
         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
         setScreen('account');
         setEmail(""); setPassword("");
@@ -384,11 +410,20 @@ export default function IndexScreen(): JSX.Element {
     if (password !== confirmPassword) { setLoginError("Passwords do not match."); return; }
     if (!email || !password) { setLoginError("Please fill in all fields."); return; }
     try {
-      const usersData = await AsyncStorage.getItem(USERS_KEY);
-      const users: User[] = usersData ? JSON.parse(usersData) : [];
-      if (users.some((u) => u.email === email)) { setLoginError("Email already registered."); return; }
-      users.push({ email, password });
-      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+      const { users } = await queryOnce({ users: { $: { where: { email: email } } } });
+      if (users.length > 0) { setLoginError("Email already registered."); return; }
+      const userId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      await db.transact(
+        db.tx.users[userId].update({
+          id: userId,
+          email,
+          password,
+          username: email.split("@")[0],
+          vehicles: [],
+          selectedVehicleId: null,
+          trips: [],
+        })
+      );
       setRegisterSuccess(true);
       setEmail(""); setPassword(""); setConfirmPassword("");
     } catch (e) { console.error("register error:", e); setLoginError("Error registering. Please try again."); }
@@ -406,23 +441,27 @@ export default function IndexScreen(): JSX.Element {
   const saveUsername = async () => {
     if (!currentUser || !userData) return;
     const updated: UserData = { ...userData, username: newUsername.trim() || userData.username };
-    await saveUserData(currentUser, updated);
-    setUsernameModal(false);
+    const saved = await saveUserData(currentUser, updated);
+    if (saved) {
+      setUsernameModal(false);
+    }
   };
 
   const savePassword = async () => {
     if (!currentUser) return;
     if (!oldPassword || !newPassword1 || !newPassword2) { Alert.alert("Password", "Please fill all fields."); return; }
     if (newPassword1 !== newPassword2) { Alert.alert("Password", "New passwords do not match."); return; }
-    const usersData = await AsyncStorage.getItem(USERS_KEY);
-    const users: User[] = usersData ? JSON.parse(usersData) : [];
-    const idx = users.findIndex(u => u.email === currentUser);
-    if (idx === -1) { Alert.alert("Password", "User not found."); return; }
-    if (users[idx].password !== oldPassword) { Alert.alert("Password", "Old password is incorrect."); return; }
-    users[idx].password = newPassword1;
-    await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-    setPasswordModal(false);
-    Alert.alert("Password", "Password updated.");
+    const { users } = await queryOnce({ users: { $: { where: { id: currentUser } } } });
+    const u = users[0];
+    if (u.password !== oldPassword) { Alert.alert("Password", "Old password is incorrect."); return; }
+    try {
+      await db.transact(db.tx.users[currentUser].update({ password: newPassword1 }));
+      setPasswordModal(false);
+      Alert.alert("Password", "Password updated.");
+    } catch (e) {
+      console.error("savePassword error:", e);
+      Alert.alert("Error", "Failed to save password: " + (e as Error).message);
+    }
   };
 
   /* ---------- UI helpers ---------- */
@@ -430,8 +469,10 @@ export default function IndexScreen(): JSX.Element {
   const setSelectedVehicle = async (id: string) => {
     if (!currentUser || !userData) return;
     const updated: UserData = { ...userData, selectedVehicleId: id };
-    await saveUserData(currentUser, updated);
-    setVehicleDropdownOpen(false);
+    const saved = await saveUserData(currentUser, updated);
+    if (saved) {
+      setVehicleDropdownOpen(false);
+    }
   };
 
   const emissionColor = (valueRaw: any) => {
@@ -449,24 +490,37 @@ export default function IndexScreen(): JSX.Element {
     </View>
   );
 
-  /* ---------- Chart ---------- */
-  const chartWidth = Math.min(screenWidth - 48, 680);
+  /* ---------- Chart (improved) ---------- */
+  const [chartContainerWidth, setChartContainerWidth] = useState<number>(Math.min(Dimensions.get('window').width - 48, 680));
   const vehiclesList = userData?.vehicles || [];
-  const maxLen = Math.max(1, ...vehiclesList.map(v => v.trend.length || 0));
-  const labels = Array.from({ length: maxLen }, (_, i) => `${i + 1}`);
+  const maxLen = Math.max(1, ...vehiclesList.map(v => v.trend?.length || 0));
+  const labels = vehiclesList.length > 0 ? Array.from({ length: maxLen }, (_, i) => `${i + 1}`) : ['1'];
   const seriesColors = ["#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#14b8a6"];
-  const datasets = vehiclesList.map((v, idx) => {
-    const data = [...v.trend];
-    if (data.length === 0) data.push(0);
-    while (data.length < maxLen) data.push(data[data.length - 1]);
+
+  const datasets = vehiclesList.length > 0 ? vehiclesList.map((v, idx) => {
+    const data = v.trend?.length ? [...v.trend] : [0];
+    while (data.length < maxLen) data.push(data[data.length - 1] || 0);
+
+    const isSelected = v.id === userData?.selectedVehicleId;
     const color = (opacity = 1) => {
       const hex = seriesColors[idx % seriesColors.length];
       const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
-      return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+      const baseOpacity = isSelected ? opacity : 0.45 * opacity;
+      return `rgba(${r}, ${g}, ${b}, ${baseOpacity})`;
     };
-    return { data, color, strokeWidth: 3, withDots: true };
-  });
-  const chartData = { labels, datasets, legend: vehiclesList.map(v => v.name) };
+    return { data, color, strokeWidth: isSelected ? 4 : 2, withDots: true };
+  }) : [{
+    data: [0],
+    color: (opacity = 1) => `rgba(55, 65, 81, ${opacity})`,
+    strokeWidth: 2,
+    withDots: true
+  }];
+
+  const chartData = {
+    labels,
+    datasets,
+    legend: vehiclesList.length > 0 ? vehiclesList.map(v => v.name) : ['No vehicles']
+  };
 
   /* ---------- Screens ---------- */
 
@@ -697,10 +751,10 @@ export default function IndexScreen(): JSX.Element {
           {showSteps && (
             <View style={[styles.stepsCard, { backgroundColor: "#0b0f19", borderColor: "#1f2937", marginTop: 12 }]}>
               <Text style={[styles.cardTitle, { color: "#fff" }]}>Find your VIN</Text>
-              <Text style={[styles.stepItem, { color: "#e5e7eb" }]}>• Driver’s side dashboard (visible through windshield)</Text>
-              <Text style={[styles.stepItem, { color: "#e5e7eb" }]}>• Driver’s door jamb sticker</Text>
-              <Text style={[styles.stepItem, { color: "#e5e7eb" }]}>• Registration / insurance documents</Text>
-              <Text style={[styles.stepItem, { color: "#e5e7eb" }]}>• 17 characters (A–Z, 0–9), never I, O, or Q</Text>
+              <Text style={styles.stepItemLight}>• Driver’s side dashboard (visible through windshield)</Text>
+              <Text style={styles.stepItemLight}>• Driver’s door jamb sticker</Text>
+              <Text style={styles.stepItemLight}>• Registration / insurance documents</Text>
+              <Text style={styles.stepItemLight}>• 17 characters (A–Z, 0–9), never I, O, or Q</Text>
             </View>
           )}
 
@@ -734,9 +788,11 @@ export default function IndexScreen(): JSX.Element {
 
         <BottomTabs active="vehicles" setScreen={setScreen} />
 
-        {/* VIN Modal inside Vehicles page */}
+        {/* VIN Modal inside Vehicles page — FIXED OVERLAY so typing doesn't close it */}
         <Modal visible={vinModalOpen} transparent animationType="slide" onRequestClose={() => setVinModalOpen(false)}>
-          <Pressable style={styles.modalOverlay} onPress={() => setVinModalOpen(false)}>
+          <View style={styles.modalOverlay}>
+            {/* Backdrop behind the card only */}
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => setVinModalOpen(false)} />
             <View style={[styles.modalCard, { width: '92%' }]}>
               <Text style={styles.modalTitle}>Add Vehicle via VIN</Text>
 
@@ -783,7 +839,7 @@ export default function IndexScreen(): JSX.Element {
                 </TouchableOpacity>
               </View>
             </View>
-          </Pressable>
+          </View>
         </Modal>
 
         <UsernameModal visible={usernameModal} value={newUsername} onChange={setNewUsername} onClose={() => setUsernameModal(false)} onSave={saveUsername} />
@@ -850,12 +906,18 @@ export default function IndexScreen(): JSX.Element {
           </View>
         </View>
 
-        {/* Trends */}
-        <View style={styles.trendsCard}>
+        {/* Trends (improved & responsive) */}
+        <View
+          style={styles.trendsCard}
+          onLayout={(e) => {
+            const w = e.nativeEvent.layout.width;
+            if (w && Math.abs(w - chartContainerWidth) > 2) setChartContainerWidth(Math.min(w, 680));
+          }}
+        >
           <Text style={styles.cardTitle}>Recent Trends (comparison)</Text>
           <LineChart
             data={chartData}
-            width={chartWidth}
+            width={chartContainerWidth}
             height={260}
             withInnerLines
             withOuterLines
@@ -863,7 +925,9 @@ export default function IndexScreen(): JSX.Element {
             withDots
             segments={5}
             yAxisInterval={1}
-            fromZero={true}
+            fromZero
+            yAxisSuffix=" g"
+            formatYLabel={(v) => String(Math.round(Number(v)))}
             bezier
             chartConfig={{
               backgroundGradientFrom: "#ffffff",
@@ -876,7 +940,7 @@ export default function IndexScreen(): JSX.Element {
             }}
             style={{ borderRadius: 12 }}
             onDataPointClick={({ value, x, y, datasetIndex }) => {
-              const label = (userData?.vehicles || [])[datasetIndex]?.name ?? "Vehicle";
+              const label = chartData.legend[datasetIndex] ?? "Vehicle";
               setTooltip({ x, y, value, label });
               setTimeout(() => setTooltip(null), 1800);
             }}
@@ -887,7 +951,7 @@ export default function IndexScreen(): JSX.Element {
               pointerEvents="none"
               style={{
                 position: 'absolute',
-                left: Math.max(8, Math.min(chartWidth - 120, tooltip.x - 40)),
+                left: Math.max(8, Math.min(chartContainerWidth - 120, tooltip.x - 40)),
                 top: Math.max(8, tooltip.y + 8),
                 backgroundColor: '#111827',
                 paddingHorizontal: 8,
@@ -902,10 +966,12 @@ export default function IndexScreen(): JSX.Element {
 
           {/* Legend */}
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 10 }}>
-            {(userData?.vehicles || []).map((v, idx) => (
-              <View key={v.id} style={{ flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 8 }}>
-                <View style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: seriesColors[idx % seriesColors.length], marginRight: 6 }} />
-                <Text style={{ color: '#374151', fontSize: 12 }}>{v.name}</Text>
+            {chartData.legend.map((name, idx) => (
+              <View key={idx} style={{ flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 8 }}>
+                <View style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: seriesColors[idx % seriesColors.length], opacity: vehiclesList[idx]?.id === userData?.selectedVehicleId ? 1 : 0.45, marginRight: 6 }} />
+                <Text style={{ color: '#374151', fontSize: 12 }}>
+                  {name}{vehiclesList[idx]?.id === userData?.selectedVehicleId ? " (selected)" : ""}
+                </Text>
               </View>
             ))}
           </View>
@@ -949,7 +1015,6 @@ function Row({ label, value }: { label: string; value?: string }): JSX.Element {
   );
 }
 
-// ---- FIXED TYPE: refEl accepts RefObject<View | null> ----
 function HeaderBar({
   titleLeft, initial, onAvatarPress, refEl,
 }: {
@@ -1158,6 +1223,7 @@ const styles = StyleSheet.create({
 
   // Steps card
   stepsCard: { borderRadius: 14, padding: 16, borderWidth: 1 },
+  stepItemLight: { color: "#e5e7eb", marginTop: 4 },
 
   // HeaderBar
   headerBar: {
