@@ -181,7 +181,7 @@ function AuthScreen({ onLogin, setUserData, saveLocalData }: any) {
         const updatedUsers: StoredUser[] = [...allUsers, newStoredUser];
 
         await AsyncStorage.setItem(USERS_KEY, JSON.stringify(updatedUsers));
-        await saveLocalData(newUser); // Save clean version (no password)
+        await saveLocalData(newUser);
         setUserData(newUser);
         onLogin(true);
       } else {
@@ -253,7 +253,6 @@ function AuthScreen({ onLogin, setUserData, saveLocalData }: any) {
     </SafeAreaView>
   );
 }
-
 
 /* -------------------- ACCOUNT -------------------- */
 function AccountScreen({ userData, setUserData, currentUserId, saveLocalData, onLogout }: any) {
@@ -341,7 +340,7 @@ function AccountScreen({ userData, setUserData, currentUserId, saveLocalData, on
           )}
           <LineChart
             data={chartData}
-            width={screenWidth - 40}
+            width={screenWidth - 60}   // ← fixed overflow
             height={240}
             yAxisSuffix="g"
             yAxisInterval={1}
@@ -366,7 +365,7 @@ function AccountScreen({ userData, setUserData, currentUserId, saveLocalData, on
             withShadow={true}
             withVerticalLabels={true}
             withHorizontalLabels={true}
-            style={{ borderRadius: 16 }}
+            style={{ borderRadius: 16, overflow: "hidden" }}   // ← extra safety
           />
           <Text style={styles.chartSub}>
             {selectedVehicle === "all"
