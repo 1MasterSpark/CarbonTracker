@@ -19,94 +19,73 @@ import { NavigationContainer } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { LineChart } from "react-native-chart-kit";
 import { Picker } from "@react-native-picker/picker";
-import { init, tx, id } from "@instantdb/react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-// Ensure polyfills are loaded early
-import "react-native-get-random-values";
-
-const APP_ID = "d8681029-bc7b-4e69-886b-74815444c014"; // Your team's InstantDB app ID
-
-// Client-side schema (team must ensure this matches InstantDB dashboard)
-const schema = {
-  users: {
-    fields: { username: "string", email: "string" },
-    relations: { vehicles: "many" },
-  },
-  vehicles: {
-    fields: {
-      name: "string",
-      vin: "string",
-      body: "string",
-      fuel: "string",
-      vehicleType: "string",
-      year: "number",
-      trend: "json",
-      ownerId: "string",
-    },
-    relations: { user: "one" },
-  },
-};
-
-const db = init({ appId: APP_ID, schema });
-
 const VIN_MAX_LEN = 17;
 
 const Tab = createBottomTabNavigator();
 
+const STORAGE_KEY = "@CarbonIQ_LocalData";
+
+interface Vehicle {
+  id: string;
+  name: string;
+  vin: string;
+  body: string;
+  fuel: string;
+  vehicleType: string;
+  year: number;
+  trend: number[];
+  ownerId: string;
+}
+
+interface UserData {
+  id: string;
+  username: string;
+  email: string;
+  vehicles: Vehicle[];
+}
+
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [userData, setUserData] = useState<any>(null);
-  const [isLoading, setIsLoading] = useState(true); // Added to wait for runtime
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const { user, isLoading: authLoading } = db.useAuth();
+  const loadLocalData = async () => {
+    try {
+      const json = await AsyncStorage.getItem(STORAGE_KEY);
+      if (json) {
+        const data = JSON.parse(json);
+        setCurrentUserId(data.id);
+        setUserData(data);
+        setLoggedIn(true);
+      }
+    } catch (err) {
+      setError("Failed to load local data");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const saveLocalData = async (data: UserData) => {
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (err) {
+      setError("Failed to save data locally");
+    }
+  };
 
   useEffect(() => {
-    if (authLoading) return; // Wait for auth to initialize
+    loadLocalData();
+  }, []);
 
-    if (user) {
-      setCurrentUserId(user.id);
-      setLoggedIn(true);
-      try {
-        // Subscribe to user data with vehicles
-        const unsubscribe = db.subscribeQuery(
-          {
-            users: {
-              vehicles: {},
-              $: { where: { id: user.id } },
-            },
-          },
-          (result) => {
-            if (result.error) {
-              setError("Failed to fetch user data: " + result.error.message);
-              setIsLoading(false);
-              return;
-            }
-            const userData = result.data?.users?.[0] || {
-              username: user.email,
-              email: user.email,
-              vehicles: [],
-            };
-            setUserData(userData);
-            setIsLoading(false);
-          }
-        );
-        return () => unsubscribe(); // Cleanup subscription
-      } catch (err) {
-        setError("Error subscribing to data: " + err.message);
-        setIsLoading(false);
-      }
-    } else {
-      setIsLoading(false); // No user, show auth screen
-    }
-  }, [user, authLoading]);
-
-  if (isLoading || authLoading) {
+  if (isLoading) {
     return (
       <SafeAreaView style={styles.center}>
         <ActivityIndicator size="large" color="#111827" />
@@ -115,7 +94,7 @@ export default function App() {
     );
   }
 
-  if (!loggedIn) return <AuthScreen onLogin={setLoggedIn} setUserData={setUserData} />;
+  if (!loggedIn) return <AuthScreen onLogin={setLoggedIn} setUserData={setUserData} saveLocalData={saveLocalData} />;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -136,8 +115,9 @@ export default function App() {
                 userData={userData}
                 setUserData={setUserData}
                 currentUserId={currentUserId!}
+                saveLocalData={saveLocalData}
                 onLogout={() => {
-                  db.auth.signOut();
+                  AsyncStorage.removeItem(STORAGE_KEY);
                   setLoggedIn(false);
                   setUserData(null);
                   setCurrentUserId(null);
@@ -151,6 +131,7 @@ export default function App() {
                 userData={userData}
                 setUserData={setUserData}
                 currentUserId={currentUserId!}
+                saveLocalData={saveLocalData}
               />
             )}
           </Tab.Screen>
@@ -163,44 +144,58 @@ export default function App() {
 }
 
 /* -------------------- AUTH -------------------- */
-function AuthScreen({ onLogin, setUserData }: any) {
+function AuthScreen({ onLogin, setUserData, saveLocalData }: any) {
+  const USERS_KEY = "@CarbonIQ_Users";
   const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
-  const [authStep, setAuthStep] = useState("email");
   const [error, setError] = useState<string | null>(null);
 
-  const handleSendMagicCode = async () => {
-    if (!email) return setError("Email is required.");
-    try {
-      await db.auth.sendMagicCode({ email });
-      setAuthStep("code");
-      setError(null);
-      alert("Magic code sent to your email!");
-    } catch (err) {
-      setError("Error sending code: " + err.message);
-    }
-  };
+  const handleAuth = async () => {
+    if (!email || !password) return setError("Email and password are required.");
+    setError(null);
 
-  const handleVerifyCode = async () => {
-    if (!code) return setError("Code is required.");
     try {
-      const { user } = await db.auth.signInWithMagicCode({ email, code });
-      if (isRegister && !username) return setError("Username is required.");
+      const json = await AsyncStorage.getItem(USERS_KEY);
+      const allUsers: UserData[] = json ? JSON.parse(json) : [];
+
       if (isRegister) {
-        await db.transact(
-          tx.users[user.id].update({ username, email })
-        );
+        if (!username) return setError("Username is required for registration.");
+        const existingUser = allUsers.find((u) => u.email === email);
+        if (existingUser) return setError("An account with this email already exists.");
+
+        const userId = Date.now().toString();
+        const newUser: UserData = {
+          id: userId,
+          username,
+          email,
+          vehicles: [],
+        };
+
+        const updatedUsers = [...allUsers, { ...newUser, password }];
+        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(updatedUsers));
+        await saveLocalData(newUser);
+        setUserData(newUser);
+        onLogin(true);
+      } else {
+        const existingUser = allUsers.find((u: any) => u.email === email);
+        if (!existingUser) return setError("Account not found. Please sign up first.");
+        if (existingUser.password !== password) return setError("Incorrect password.");
+
+        const currentUser: UserData = {
+          id: existingUser.id,
+          username: existingUser.username,
+          email: existingUser.email,
+          vehicles: existingUser.vehicles || [],
+        };
+
+        await saveLocalData(currentUser);
+        setUserData(currentUser);
+        onLogin(true);
       }
-      onLogin(true);
-      const result = await db.query({
-        users: { vehicles: {}, $: { where: { id: user.id } } },
-      });
-      setUserData(result.data.users[0] || { username: isRegister ? username : user.email, email, vehicles: [] });
-      setError(null);
-    } catch (err) {
-      setError("Invalid code or network error: " + err.message);
+    } catch (e) {
+      setError("Something went wrong. Please try again.");
     }
   };
 
@@ -209,46 +204,40 @@ function AuthScreen({ onLogin, setUserData }: any) {
       <View style={styles.authCard}>
         <Text style={styles.appTitle}>CarbonIQ</Text>
         <Text style={styles.authTitle}>{isRegister ? "Create Account" : "Welcome Back"}</Text>
-        <Text style={styles.authSub}>{isRegister ? "Sign up to track your emissions" : "Login to continue"}</Text>
+        <Text style={styles.authSub}>
+          {isRegister ? "Sign up to track your emissions" : "Login to continue"}
+        </Text>
         {error && <Text style={styles.error}>{error}</Text>}
-        {authStep === "email" && (
-          <>
-            {isRegister && (
-              <TextInput
-                placeholder="Username"
-                value={username}
-                onChangeText={setUsername}
-                style={styles.input}
-                autoCapitalize="none"
-              />
-            )}
-            <TextInput
-              placeholder="Email"
-              value={email}
-              onChangeText={setEmail}
-              style={styles.input}
-              keyboardType="email-address"
-              autoCapitalize="none"
-            />
-            <TouchableOpacity style={styles.button} onPress={handleSendMagicCode}>
-              <Text style={styles.buttonText}>Send Magic Code</Text>
-            </TouchableOpacity>
-          </>
+
+        {isRegister && (
+          <TextInput
+            placeholder="Username"
+            value={username}
+            onChangeText={setUsername}
+            style={styles.input}
+            autoCapitalize="none"
+          />
         )}
-        {authStep === "code" && (
-          <>
-            <TextInput
-              placeholder="Enter Code"
-              value={code}
-              onChangeText={setCode}
-              style={styles.input}
-              keyboardType="numeric"
-            />
-            <TouchableOpacity style={styles.button} onPress={handleVerifyCode}>
-              <Text style={styles.buttonText}>{isRegister ? "Register" : "Login"}</Text>
-            </TouchableOpacity>
-          </>
-        )}
+        <TextInput
+          placeholder="Email"
+          value={email}
+          onChangeText={setEmail}
+          style={styles.input}
+          keyboardType="email-address"
+          autoCapitalize="none"
+        />
+        <TextInput
+          placeholder="Password"
+          value={password}
+          onChangeText={setPassword}
+          style={styles.input}
+          secureTextEntry
+        />
+
+        <TouchableOpacity style={styles.button} onPress={handleAuth}>
+          <Text style={styles.buttonText}>{isRegister ? "Register" : "Login"}</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity onPress={() => setIsRegister(!isRegister)}>
           <Text style={styles.authToggle}>
             {isRegister ? "Already have an account? Login" : "New here? Create an account"}
@@ -259,8 +248,9 @@ function AuthScreen({ onLogin, setUserData }: any) {
   );
 }
 
+
 /* -------------------- ACCOUNT -------------------- */
-function AccountScreen({ userData, setUserData, currentUserId, onLogout }: any) {
+function AccountScreen({ userData, setUserData, currentUserId, saveLocalData, onLogout }: any) {
   const screenWidth = Dimensions.get("window").width;
   const [selectedVehicle, setSelectedVehicle] = useState<string | null>(null);
   const colors = [
@@ -373,7 +363,9 @@ function AccountScreen({ userData, setUserData, currentUserId, onLogout }: any) 
             style={{ borderRadius: 16, paddingRight: 20 }}
           />
           <Text style={styles.chartSub}>
-            {selectedVehicle === "all" ? "Track all vehicles' emission trends over the week." : "Track your vehicle's emission trends over the week."}
+            {selectedVehicle === "all"
+              ? "Track all vehicles' emission trends over the week."
+              : "Track your vehicle's emission trends over the week."}
           </Text>
         </View>
       </ScrollView>
@@ -382,7 +374,7 @@ function AccountScreen({ userData, setUserData, currentUserId, onLogout }: any) 
 }
 
 /* -------------------- VEHICLES -------------------- */
-function VehiclesScreen({ userData, setUserData, currentUserId }: any) {
+function VehiclesScreen({ userData, setUserData, currentUserId, saveLocalData }: any) {
   const [vin, setVin] = useState("");
   const [vehicle, setVehicle] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -427,9 +419,9 @@ function VehiclesScreen({ userData, setUserData, currentUserId }: any) {
   };
 
   const registerVehicle = async () => {
-    if (!vehicle) return;
-    const newVehicleId = id();
-    const newV = {
+    if (!vehicle || !userData) return;
+    const newVehicleId = Date.now().toString();
+    const newV: Vehicle = {
       id: newVehicleId,
       name: `${vehicle.make} ${vehicle.model}`,
       vin,
@@ -440,22 +432,18 @@ function VehiclesScreen({ userData, setUserData, currentUserId }: any) {
       trend: generateRandomTrend(),
       ownerId: currentUserId,
     };
-    try {
-      await db.transact([
-        tx.vehicles[newVehicleId].update(newV),
-        tx.users[currentUserId].link({ vehicles: newVehicleId }),
-      ]);
-      const updated = await db.query({
-        users: { vehicles: {}, $: { where: { id: currentUserId } } },
-      });
-      setUserData(updated.data.users[0] || { username: userData.username, email: userData.email, vehicles: [] });
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setVin("");
-      setVehicle(null);
-      setVinModal(false);
-    } catch (err) {
-      setError("Error adding vehicle: " + err.message);
-    }
+
+    const updatedUser = {
+      ...userData,
+      vehicles: [...userData.vehicles, newV],
+    };
+
+    setUserData(updatedUser);
+    await saveLocalData(updatedUser);
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setVin("");
+    setVehicle(null);
+    setVinModal(false);
   };
 
   return (
