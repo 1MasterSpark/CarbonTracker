@@ -50,6 +50,10 @@ interface UserData {
   vehicles: Vehicle[];
 }
 
+interface StoredUser extends UserData {
+  password: string;
+}
+
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -158,7 +162,7 @@ function AuthScreen({ onLogin, setUserData, saveLocalData }: any) {
 
     try {
       const json = await AsyncStorage.getItem(USERS_KEY);
-      const allUsers: UserData[] = json ? JSON.parse(json) : [];
+      const allUsers: StoredUser[] = json ? JSON.parse(json) : [];
 
       if (isRegister) {
         if (!username) return setError("Username is required for registration.");
@@ -173,13 +177,15 @@ function AuthScreen({ onLogin, setUserData, saveLocalData }: any) {
           vehicles: [],
         };
 
-        const updatedUsers = [...allUsers, { ...newUser, password }];
+        const newStoredUser: StoredUser = { ...newUser, password };
+        const updatedUsers: StoredUser[] = [...allUsers, newStoredUser];
+
         await AsyncStorage.setItem(USERS_KEY, JSON.stringify(updatedUsers));
-        await saveLocalData(newUser);
+        await saveLocalData(newUser); // Save clean version (no password)
         setUserData(newUser);
         onLogin(true);
       } else {
-        const existingUser = allUsers.find((u: any) => u.email === email);
+        const existingUser = allUsers.find((u) => u.email === email);
         if (!existingUser) return setError("Account not found. Please sign up first.");
         if (existingUser.password !== password) return setError("Incorrect password.");
 
@@ -360,7 +366,7 @@ function AccountScreen({ userData, setUserData, currentUserId, saveLocalData, on
             withShadow={true}
             withVerticalLabels={true}
             withHorizontalLabels={true}
-            style={{ borderRadius: 16, paddingRight: 20 }}
+            style={{ borderRadius: 16 }}
           />
           <Text style={styles.chartSub}>
             {selectedVehicle === "all"
